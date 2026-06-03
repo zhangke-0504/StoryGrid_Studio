@@ -1,6 +1,5 @@
 logs/*
 my.log
-uv.lock
 
 supervisor/supervisord.conf
 
