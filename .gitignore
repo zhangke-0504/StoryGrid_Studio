@@ -1,34 +1,36 @@
-logs/*
-my.log
+backend/logs/*
 
-supervisor/supervisord.conf
 
-tmp/*
-!tmp/
+# 忽略 backend/tmp 下全部内容，但保留 tmp 文件夹本身
+backend/tmp/*
+!backend/tmp/
 
-models/*
+# 忽略 TestingCode 测试代码，但保留少数特殊子目录
+backend/TestingCode/*
+!backend/TestingCode/langchain_quickstart/
+!backend/TestingCode/langgraph_quickstart/
+!backend/TestingCode/langgraph_multi_agents/
+!backend/TestingCode/static/
 
-db/novel.db
+# 忽略 config 下全部内容，但保留 config 目录及 prompt 子目录
+backend/config/*
+!backend/config/
+!backend/config/prompt/
 
-TestingCode/*
-!TestingCode/langchain_quickstart/
-!TestingCode/langgraph_quickstart/
-!TestingCode/langgraph_multi_agents/
-!TestingCode/static/
-
-config/*
-!config/
-!config/prompt/
-
-*.yaml
+# 全局忽略编译产生的文件及敏感内容
 *.pyc
-*.log
 *.ipynb
+*.log
 *.mp4
+# 只忽略 backend 下的 yaml 文件，避免误伤前端配置（如后期加入）
+backend/**/*.yaml
 
-.vscode
-.venv
+# 忽略 Python 本地开发设置和虚拟环境
+backend/.vscode/
+backend/.venv/
 
-__pycache__
+# 忽略所有目录下的 __pycache__
+**/__pycache__/
 
+# 保留所有下级 .gitkeep 文件（用于占位）
 !*/.gitkeep
