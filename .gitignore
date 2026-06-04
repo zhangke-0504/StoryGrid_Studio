@@ -11,11 +11,14 @@ models/*
 db/novel.db
 
 TestingCode/*
-!TestingCode/dbtest/
-!TestingCode/httptest/
+!TestingCode/langchain_quickstart/
+!TestingCode/langgraph_quickstart/
+!TestingCode/langgraph_multi_agents/
+!TestingCode/static/
 
 config/*
 !config/
+!config/prompt/
 
 *.yaml
 *.pyc

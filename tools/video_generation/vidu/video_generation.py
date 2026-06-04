@@ -2,25 +2,109 @@ import os
 import time
 import yaml
 import asyncio
-import logging
 import aiohttp  # 用aiohttp替换httpx
+import re
+import sys
 from pathlib import Path
-from typing import Optional
+from typing import Any, Dict, List, Optional
 
-from tools.obs.domestic_down_obs import DownloadTaskClient
-from tools.obs.obs_files import OBSManager
+from langchain_core.tools import tool
+from pydantic import BaseModel, Field
 
 
-logger = logging.getLogger(__name__)
+def _find_project_root() -> Path:
+    current = Path(__file__).resolve().parent
+    markers = {"pyproject.toml", ".git"}
+    while True:
+        if any((current / marker).exists() for marker in markers):
+            return current
+        if current.parent == current:
+            return Path.cwd()
+        current = current.parent
+
+
+PROJECT_ROOT = _find_project_root()
+if str(PROJECT_ROOT) not in sys.path:
+    sys.path.insert(0, str(PROJECT_ROOT))
+
+
+def _resolve_path(path: str) -> str:
+    resolved = Path(path)
+    if not resolved.is_absolute():
+        resolved = PROJECT_ROOT / resolved
+    return str(resolved)
+
+
+class ViduToolCharacter(BaseModel):
+    uid: str = Field(..., description="主体 UID")
+    name: str = Field(..., description="主体名字")
+    voice_id: str = Field(default="", description="音色 ID")
+    image_url: str | None = Field(default=None, description="原始图片 URL")
+    reconstructed_image_url: str | None = Field(default=None, description="重构图片 URL")
+    final_image_url: str | None = Field(default=None, description="最终图片 URL")
+
+
+class ViduToolShot(BaseModel):
+    sort: int = Field(..., description="分镜序号")
+    duration: int = Field(..., description="分镜时长")
+    theme: str = Field(..., description="分镜主题")
+    description: str = Field(..., description="分镜视频提示词")
+
+
+class ViduVideoToolResultItem(BaseModel):
+    sort: int = Field(..., description="分镜序号")
+    theme: str = Field(..., description="分镜主题")
+    prompt: str = Field(..., description="提交给 Vidu 的最终提示词")
+    subjects: List[Dict[str, Any]] = Field(default_factory=list, description="提交给 Vidu 的主体列表")
+    task_id: str | None = Field(default=None, description="Vidu 任务 ID")
+    status: str = Field(..., description="submitted、success、failed")
+    video_url: str | None = Field(default=None, description="成功时的视频 URL")
+    error: str | None = Field(default=None, description="失败时的错误信息")
+
+
+class ViduVideoToolBatchResult(BaseModel):
+    shots: List[ViduVideoToolResultItem]
+
+
+UID_REFERENCE_PATTERN = re.compile(r"@\^([^\^]+)\^")
+
+
+def _extract_referenced_uids(description: str) -> List[str]:
+    return list(dict.fromkeys(UID_REFERENCE_PATTERN.findall(description)))
+
+
+def _resolve_character_image(character: ViduToolCharacter) -> str | None:
+    return character.final_image_url or character.reconstructed_image_url or character.image_url
+
+
+def _build_vidu_prompt(description: str) -> str:
+    return UID_REFERENCE_PATTERN.sub(lambda match: f"@{match.group(1)}", description)
+
+
+def _build_vidu_subjects(shot: ViduToolShot, characters: List[ViduToolCharacter]) -> List[Dict[str, Any]]:
+    referenced_uids = set(_extract_referenced_uids(shot.description))
+    subjects: List[Dict[str, Any]] = []
+    for character in characters:
+        if character.uid not in referenced_uids:
+            continue
+        image_url = _resolve_character_image(character)
+        if not image_url:
+            continue
+        subjects.append(
+            {
+                "id": character.uid,
+                "images": [image_url],
+                "voice_id": character.voice_id or "",
+            }
+        )
+    return subjects
 
 class ViduVideoGenerator:
     def __init__(self, config_path="config/vidu/config.yaml"):
         """初始化，自动从 YAML 配置文件加载 API_KEY"""
-        self.config_info = self._load_config(config_path)
+        self.config_info = self._load_config(_resolve_path(config_path))
         # self.model = self.config_info['MODEL']
         self.model = "viduq2"
-        self.download_dir = Path("tmp/download")
-        self.download_dir.mkdir(parents=True, exist_ok=True)
         self.headers = {
             "Content-Type": "application/json",
             "Authorization": f"Token {self.config_info['API_KEY']}"
@@ -118,37 +202,12 @@ class ViduVideoGenerator:
                 response.raise_for_status()
                 return await response.json()
 
-    async def download_video(self, url: str, target_path: Path) -> Path:
-        """下载生成的视频到本地 tmp 目录。"""
-        async with aiohttp.ClientSession() as session:
-            async with session.get(url) as response:
-                response.raise_for_status()
-                with open(target_path, "wb") as file_obj:
-                    async for chunk in response.content.iter_chunked(8192):
-                        file_obj.write(chunk)
-        return target_path
-
-    async def upload_to_obs(self, file_path: Path, oversea: bool = True) -> Optional[str]:
-        """上传文件到 OBS 并返回访问链接。"""
-        obs_manager = OBSManager("config/obs/config.yaml")
-        try:
-            return await obs_manager.upload_async(str(file_path), oversea=oversea)
-        finally:
-            obs_manager.close()
-
-    async def cleanup_file(self, file_path: Path) -> None:
-        """删除本地临时文件。"""
-        if file_path.exists():
-            file_path.unlink()
-
-    async def wait_for_task_and_upload_to_obs(
+    async def wait_for_task_completion(
         self,
         task_id: str,
         poll_interval: int = 10,
-        oversea: bool = True,
-        filename_prefix: str = "vidu_video",
     ) -> Optional[str]:
-        """轮询视频任务，成功后上传到 OBS 并返回 OBS 链接。"""
+        """轮询视频任务，成功后返回 Vidu 提供的视频链接。"""
         while True:
             status_data = await self.check_status(task_id)
             current_state = status_data["state"]
@@ -156,14 +215,8 @@ class ViduVideoGenerator:
 
             if current_state == "success":
                 video_url = status_data["creations"][0]["url"]
-                print(f"供应商video_url: {video_url}")
-                obs_url = await self.download_and_upload_to_obs(
-                    video_url,
-                    filename_prefix=filename_prefix,
-                    oversea=oversea,
-                )
-                print(f"🌐 OBS 链接: {obs_url}")
-                return obs_url
+                print(f"Vidu 视频链接: {video_url}")
+                return video_url
 
             if current_state == "failed":
                 print("生成失败的时候，返回的结构是：", status_data)
@@ -173,53 +226,105 @@ class ViduVideoGenerator:
 
             await asyncio.sleep(poll_interval)
 
-    async def download_and_upload_to_obs(
-        self,
-        video_url: str,
-        filename_prefix: str = "vidu_video",
-        oversea: bool = True,
-    ) -> str:
-        """下载供应商视频、上传到 OBS，并在完成后删除本地临时文件。"""
-        local_path = self.download_dir / f"{filename_prefix}_{int(time.time())}.mp4"
-        try:
-            downloader = DownloadTaskClient()
-            try:
-                task_result = await downloader.create_and_wait(
-                    source_url=video_url,
-                    overseas=oversea,
-                    poll_interval=1.0,
-                    timeout=300.0,
+
+@tool(parse_docstring=True)
+async def generate_vidu_videos_tool(
+    shots: List[Dict[str, Any]],
+    characters: List[Dict[str, Any]],
+    config_path: str = "config/vidu/config.yaml",
+    resolution: str = "540p",
+    model: str = "viduq3",
+    audio: bool = True,
+    aspect_ratio: str = "16:9",
+    wait_for_completion: bool = True,
+    poll_interval: int = 10,
+) -> str:
+    """为多个分镜批量提交 Vidu 视频生成任务。
+
+    Args:
+        shots: 分镜列表，每项至少需要包含 sort、duration、theme、description。
+        characters: 主体列表，需要包含 uid 以及可用图片 URL 字段。
+        config_path: Vidu 配置路径。
+        resolution: 视频分辨率。
+        model: Vidu 模型名。
+        audio: 是否生成音频。
+        aspect_ratio: 视频比例。
+        wait_for_completion: 是否轮询等待视频完成。
+        poll_interval: 轮询间隔秒数。
+    """
+    generator = ViduVideoGenerator(config_path=config_path)
+    parsed_shots = [ViduToolShot.model_validate(shot) for shot in shots]
+    parsed_characters = [ViduToolCharacter.model_validate(character) for character in characters]
+
+    results: List[ViduVideoToolResultItem] = []
+    for shot in parsed_shots:
+        subjects = _build_vidu_subjects(shot, parsed_characters)
+        prompt = _build_vidu_prompt(shot.description)
+        if not subjects:
+            results.append(
+                ViduVideoToolResultItem(
+                    sort=shot.sort,
+                    theme=shot.theme,
+                    prompt=prompt,
+                    subjects=[],
+                    task_id=None,
+                    status="failed",
+                    video_url=None,
+                    error="该分镜缺少可用的主体图片，无法提交 Vidu 视频生成。",
                 )
-            except Exception as e:
-                logger.error("远端创建下载任务失败，video_url=%s, err=%s", video_url, e)
-                raise
+            )
+            continue
 
-            source_download_url = task_result.get("obs_url") or task_result.get("url")
-            if not source_download_url:
-                logger.error("下载任务返回结果中缺少可下载地址，task_result=%s", task_result)
-                raise RuntimeError("没有可下载的 URL")
+        try:
+            task_id = await generator.refer_gen_video(
+                subjects=subjects,
+                prompt=prompt,
+                resolution=resolution,
+                duration=shot.duration,
+                audio=audio,
+                aspect_ratio=aspect_ratio,
+                model=model,
+            )
+            if wait_for_completion:
+                video_url = await generator.wait_for_task_completion(task_id, poll_interval=poll_interval)
+                status = "success" if video_url else "failed"
+            else:
+                video_url = None
+                status = "submitted"
 
-            logger.info("远端下载完成，开始下载到本地: %s", source_download_url)
+            results.append(
+                ViduVideoToolResultItem(
+                    sort=shot.sort,
+                    theme=shot.theme,
+                    prompt=prompt,
+                    subjects=subjects,
+                    task_id=task_id,
+                    status=status,
+                    video_url=video_url,
+                    error=None if status != "failed" else "Vidu 任务执行失败。",
+                )
+            )
+        except Exception as exc:
+            results.append(
+                ViduVideoToolResultItem(
+                    sort=shot.sort,
+                    theme=shot.theme,
+                    prompt=prompt,
+                    subjects=subjects,
+                    task_id=None,
+                    status="failed",
+                    video_url=None,
+                    error=repr(exc),
+                )
+            )
 
-            await self.download_video(source_download_url, local_path)
-            print(f"🎉 视频生成成功，已下载到: {local_path}")
-
-            obs_url = await self.upload_to_obs(local_path, oversea=oversea)
-            if not obs_url:
-                raise RuntimeError("OBS 上传失败")
-
-            return obs_url
-        finally:
-            if local_path.exists():
-                await self.cleanup_file(local_path)
-                print(f"🧹 已清理本地文件: {local_path}")
-            print(f"🧼 临时文件是否已删除: {not local_path.exists()}")
+    return ViduVideoToolBatchResult(shots=results).model_dump_json(ensure_ascii=False)
 
 
 if __name__ == "__main__":
     async def main():
         generator = ViduVideoGenerator()
-        obs_url = None
+        video_url = None
 
         # # ================ 测试图生视频 ================
         # print("================== 开始测试图生视频 =================")
@@ -327,16 +432,12 @@ if __name__ == "__main__":
                                                       duration=8, 
                                                       model="viduq3")
             print(f"✅ 任务创建成功! Task ID: {task_id}")
-            return await generator.wait_for_task_and_upload_to_obs(
-                task_id,
-                poll_interval=10,
-                oversea=True,
-                filename_prefix="vidu_reference_video",
-            )
+            video_url = await generator.wait_for_task_completion(task_id, poll_interval=10)
+            return video_url
         except Exception as e:
             print(f"⚠️ 发生异常: {repr(e)}")
             return None
 
     result = asyncio.run(main())
     # python -m tools.video_generation.vidu.video_generation
-    print(f"main() 返回的 OBS 链接: {result}")
+    print(f"main() 返回的 Vidu 链接: {result}")
