@@ -23,7 +23,7 @@ PROJECT_ROOT = _find_project_root()
 if str(PROJECT_ROOT) not in sys.path:
 	sys.path.insert(0, str(PROJECT_ROOT))
 
-from utils.llm_factory import build_chat_openai  # noqa: E402
+from utils.llm_factory import build_chat_openai, with_llm_retry  # noqa: E402
 from utils.retry import async_retry  # noqa: E402
 
 
@@ -82,7 +82,9 @@ async def generate_subject_prompts(
 		f"language: {payload.language}\n"
 		f"subjects: {json.dumps([subject.model_dump(mode='json') for subject in payload.subjects], ensure_ascii=False, indent=2)}"
 	)
-	llm = build_chat_openai(config_path=config_path).with_structured_output(SubjectPromptToolResult)
+	llm = with_llm_retry(
+		build_chat_openai(config_path=config_path).with_structured_output(SubjectPromptToolResult, method="function_calling")
+	)
 	result = await llm.ainvoke(
 		[
 			SystemMessage(content=SUBJECT_PROMPT_TOOL_INSTRUCTIONS),

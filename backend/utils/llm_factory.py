@@ -11,8 +11,37 @@ import sys
 from pathlib import Path
 from typing import Any, Dict, Optional
 
+import httpx
 import yaml
+from langchain_core.runnables import Runnable
 from langchain_openai import ChatOpenAI
+from openai import APIConnectionError, APITimeoutError, InternalServerError, RateLimitError
+
+
+RETRY_EXCEPTIONS: tuple[type[BaseException], ...] = (
+	APIConnectionError,
+	APITimeoutError,
+	RateLimitError,
+	InternalServerError,
+	httpx.ConnectError,
+	httpx.ReadError,
+	httpx.WriteError,
+	httpx.RemoteProtocolError,
+	httpx.PoolTimeout,
+	httpx.ConnectTimeout,
+	httpx.ReadTimeout,
+)
+
+
+def with_llm_retry(runnable: Runnable, max_attempts: int = 3) -> Runnable:
+	"""Wrap any Runnable (chat model, structured-output chain, ...) with a
+	LangChain-level retry that survives transient connection / timeout errors
+	from the openai stack."""
+	return runnable.with_retry(
+		retry_if_exception_type=RETRY_EXCEPTIONS,
+		stop_after_attempt=max_attempts,
+		wait_exponential_jitter=True,
+	)
 
 
 def _find_project_root() -> Path:

@@ -69,6 +69,12 @@ def _build_llm(config_path: str = "config/openai/config.yaml") -> ChatOpenAI:
     return build_chat_openai(config_path=config_path)
 
 
+def _structured(llm: ChatOpenAI, schema):  # noqa: D401
+    from utils.llm_factory import with_llm_retry
+
+    return with_llm_retry(llm.with_structured_output(schema, method="function_calling"))
+
+
 def _message_text(message: Any) -> str:
     content = getattr(message, "content", "")
     if isinstance(content, str):
@@ -248,7 +254,7 @@ request:
 """.strip().format(request_json=request.model_dump_json(indent=2, ensure_ascii=False))
 
     async def _normalize_agent_output(self, request: ShotGenerationInput, agent_text: str) -> ShotAgentFinalResult:
-        structured_llm = self.llm.with_structured_output(ShotAgentFinalResult)
+        structured_llm = _structured(self.llm, ShotAgentFinalResult)
         return await structured_llm.ainvoke(
             [
                 {
@@ -277,6 +283,8 @@ request:
         user_prompt = self._build_react_user_prompt(request)
         prefix = f"[{log_prefix}] " if log_prefix else ""
         seen_tool_call_ids: set[str] = set()
+        vidu_videos: List[Dict[str, Any]] = []
+        shot_prompt_payload: Optional[Dict[str, Any]] = None
 
         async for chunk in self.agent.astream(
             {"messages": [{"role": "user", "content": user_prompt}]},
@@ -311,6 +319,10 @@ request:
                     seen_tool_messages.add(tool_message_id)
                     tool_name = getattr(latest_message, "name", "unknown_tool")
                     parsed_payload = _parse_tool_message_content(getattr(latest_message, "content", ""))
+                    if tool_name == "generate_vidu_videos_tool" and isinstance(parsed_payload, dict):
+                        vidu_videos = parsed_payload.get("shots", []) or []
+                    elif tool_name == "generate_shot_prompts_tool" and isinstance(parsed_payload, dict):
+                        shot_prompt_payload = parsed_payload
                     if verbose:
                         print(f"{prefix}tool_result: {tool_name}\n{_format_tool_result(tool_name, getattr(latest_message, 'content', ''))}")
                     await emit_event(
@@ -330,9 +342,31 @@ request:
             raise ValueError("shot agent 未返回最终结果")
 
         try:
-            return ShotAgentFinalResult.model_validate(_extract_json_object(final_text))
+            final_result = ShotAgentFinalResult.model_validate(_extract_json_object(final_text))
         except Exception:
-            return await self._normalize_agent_output(request, final_text)
+            final_result = await self._normalize_agent_output(request, final_text)
+
+        if vidu_videos:
+            try:
+                final_result.videos = [ShotVideoItem.model_validate(item) for item in vidu_videos]
+            except Exception:
+                pass
+
+        if shot_prompt_payload:
+            shots_from_tool = shot_prompt_payload.get("shots") or []
+            if shots_from_tool and not final_result.shots:
+                try:
+                    final_result.shots = [ShotItem.model_validate(item) for item in shots_from_tool]
+                except Exception:
+                    pass
+            plan_from_tool = shot_prompt_payload.get("plan")
+            if plan_from_tool and not getattr(final_result, "plan", None):
+                try:
+                    final_result.plan = ShotDurationPlan.model_validate(plan_from_tool)
+                except Exception:
+                    pass
+
+        return final_result
 
     async def ainvoke(
         self,

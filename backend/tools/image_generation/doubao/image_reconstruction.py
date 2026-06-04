@@ -22,7 +22,7 @@ def _resolve_path(path: str) -> str:
 		resolved = PROJECT_ROOT / resolved
 	return str(resolved)
 
-from utils.llm_factory import build_chat_openai
+from utils.llm_factory import build_chat_openai, with_llm_retry
 from utils.retry import async_retry
 from tools.image_generation.doubao.image_generation import DoubaoImageGenerator
 
@@ -131,8 +131,10 @@ class OriginImagePromptAuditor:
 """.strip().format(language=language)
 
 		prompt = f"请提炼下面原始生图提示词中的审核重点，并生成审核提示词：\n\n{origin_prompt.strip()}"
-		llm = build_chat_openai(config_path=self.openai_config_path).with_structured_output(
-			PromptAuditExtractionResult
+		llm = with_llm_retry(
+			build_chat_openai(config_path=self.openai_config_path).with_structured_output(
+				PromptAuditExtractionResult, method="function_calling"
+			)
 		)
 		return await llm.ainvoke(
 			[SystemMessage(content=instructions), HumanMessage(content=prompt)]
@@ -169,8 +171,10 @@ class OriginImagePromptAuditor:
 			f"原始生图提示词：\n{origin_prompt.strip()}\n\n"
 			f"图片审核结果：\n{audit_result_text.strip()}"
 		)
-		llm = build_chat_openai(config_path=self.openai_config_path).with_structured_output(
-			ReconstructionPromptResult
+		llm = with_llm_retry(
+			build_chat_openai(config_path=self.openai_config_path).with_structured_output(
+				ReconstructionPromptResult, method="function_calling"
+			)
 		)
 		return await llm.ainvoke(
 			[SystemMessage(content=instructions), HumanMessage(content=prompt)]

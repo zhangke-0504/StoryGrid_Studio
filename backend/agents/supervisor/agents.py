@@ -79,6 +79,12 @@ def _build_llm(config_path: str = "config/openai/config.yaml") -> ChatOpenAI:
 	return build_chat_openai(config_path=config_path)
 
 
+def _structured(llm: ChatOpenAI, schema):
+	from utils.llm_factory import with_llm_retry
+
+	return with_llm_retry(llm.with_structured_output(schema, method="function_calling"))
+
+
 def _message_text(message: Any) -> str:
 	content = getattr(message, "content", "")
 	if isinstance(content, str):
@@ -329,7 +335,7 @@ request:
 		request: StoryVideoGenerationInput,
 		agent_text: str,
 	) -> StoryVideoGenerationResult:
-		structured_llm = self.llm.with_structured_output(StoryVideoGenerationResult)
+		structured_llm = _structured(self.llm, StoryVideoGenerationResult)
 		return await structured_llm.ainvoke(
 			[
 				{

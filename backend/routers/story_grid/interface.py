@@ -173,6 +173,8 @@ async def story_grid_stream(request: Request):
 
 			token = set_event_emitter(subagent_emitter)
 			final_text_holder = {"value": ""}
+			character_result_holder: dict[str, Any] = {"value": None}
+			shot_result_holder: dict[str, Any] = {"value": None}
 
 			async def producer() -> None:
 				try:
@@ -229,6 +231,10 @@ async def story_grid_stream(request: Request):
 
 							tool_name = getattr(latest_message, "name", "unknown_tool")
 							payload = _parse_tool_message_content(getattr(latest_message, "content", ""))
+							if tool_name == "generate_story_characters_subagent" and isinstance(payload, dict):
+								character_result_holder["value"] = payload
+							elif tool_name == "generate_story_videos_subagent" and isinstance(payload, dict):
+								shot_result_holder["value"] = payload
 							await push(
 								{
 									"event": "tool_result",
@@ -254,17 +260,39 @@ async def story_grid_stream(request: Request):
 							final_text_holder["value"] = message_text
 
 					final_text = final_text_holder["value"]
+					final_payload: Any = None
 					if final_text:
 						try:
-							final_payload = StoryVideoGenerationResult.model_validate(
+							candidate = StoryVideoGenerationResult.model_validate(
 								_extract_json_object(final_text)
 							).model_dump(mode="json")
+							if candidate.get("videos") or candidate.get("shots"):
+								final_payload = candidate
 						except Exception:
-							try:
-								final_payload = json.loads(final_text)
-							except Exception:
-								final_payload = final_text
+							pass
 
+					character_payload = character_result_holder["value"]
+					shot_payload = shot_result_holder["value"]
+					if character_payload and shot_payload:
+						merged = {
+							"characters": character_payload.get("characters", []),
+							"plan": shot_payload.get("plan"),
+							"shots": shot_payload.get("shots", []),
+							"videos": shot_payload.get("videos", []),
+						}
+						if final_payload is None or not final_payload.get("videos"):
+							final_payload = merged
+						elif isinstance(final_payload, dict) and merged.get("videos"):
+							# 确保最终结果中包含真实的视频结果，而不是 supervisor LLM 可能遗漏或伪造的版本
+							final_payload["videos"] = merged["videos"]
+
+					if final_payload is None and final_text:
+						try:
+							final_payload = json.loads(final_text)
+						except Exception:
+							final_payload = final_text
+
+					if final_payload is not None:
 						await push(
 							{
 								"event": "final_result",

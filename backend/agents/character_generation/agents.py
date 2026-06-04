@@ -82,6 +82,12 @@ def _build_llm(config_path: str = "config/openai/config.yaml") -> ChatOpenAI:
     return build_chat_openai(config_path=config_path)
 
 
+def _structured(llm: ChatOpenAI, schema):  # noqa: D401
+    from utils.llm_factory import with_llm_retry
+
+    return with_llm_retry(llm.with_structured_output(schema, method="function_calling"))
+
+
 def _message_text(message: Any) -> str:
     content = getattr(message, "content", "")
     if isinstance(content, str):
@@ -277,7 +283,7 @@ class CharacterGenerationAgent:
 
     async def _generate_base_characters(self, request: CharacterGenerationInput) -> CharacterGenerationResult:
         voice_id_dict = self.lang2voice_id.get(request.language, self.lang2voice_id["zh-CN"])
-        structured_llm = self.llm.with_structured_output(CharacterGenerationResult)
+        structured_llm = _structured(self.llm, CharacterGenerationResult)
         return await structured_llm.ainvoke(
             [
                 {"role": "system", "content": CHARACTER_SYSTEM_PROMPT},
@@ -325,7 +331,7 @@ current_characters:
         base_result: CharacterGenerationResult,
         agent_text: str,
     ) -> CharacterGenerationResult:
-        structured_llm = self.llm.with_structured_output(CharacterGenerationResult)
+        structured_llm = _structured(self.llm, CharacterGenerationResult)
         return await structured_llm.ainvoke(
             [
                 {

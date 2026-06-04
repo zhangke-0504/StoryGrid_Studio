@@ -9,6 +9,18 @@ A LangGraph-based multi-agent system that converts scripts into structured story
 
 ---
 
+## 项目效果演示
+
+思考过程中生成的中间产物：
+
+![思考过程](backend/TestingCode/static/character.png)
+
+最终生成结果：
+
+![最终结果](backend/TestingCode/static/result.png)
+
+---
+
 ## 一、环境要求
 
 - Python ≥ 3.12（后端，由 [backend/pyproject.toml](backend/pyproject.toml) 锁定）

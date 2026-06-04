@@ -30,7 +30,7 @@ from config.prompt.create_shot.prompt import (  # noqa: E402
 	build_shot_duration_planner_user_prompt,
 	build_shot_generation_user_prompt,
 )
-from utils.llm_factory import build_chat_openai  # noqa: E402
+from utils.llm_factory import build_chat_openai, with_llm_retry  # noqa: E402
 from utils.retry import async_retry  # noqa: E402
 
 
@@ -117,7 +117,9 @@ def _repair_duration_plan(request: ShotPromptToolInput, plan: ShotDurationPlan) 
 async def _invoke_duration_planner(
 	config_path: str, system_prompt: str, user_prompt: str
 ) -> ShotDurationPlan:
-	llm = build_chat_openai(config_path=config_path).with_structured_output(ShotDurationPlan)
+	llm = with_llm_retry(
+		build_chat_openai(config_path=config_path).with_structured_output(ShotDurationPlan, method="function_calling")
+	)
 	return await llm.ainvoke(
 		[SystemMessage(content=system_prompt), HumanMessage(content=user_prompt)]
 	)
@@ -127,7 +129,9 @@ async def _invoke_duration_planner(
 async def _invoke_shot_generator(
 	config_path: str, system_prompt: str, user_prompt: str
 ) -> ShotGenerationResult:
-	llm = build_chat_openai(config_path=config_path).with_structured_output(ShotGenerationResult)
+	llm = with_llm_retry(
+		build_chat_openai(config_path=config_path).with_structured_output(ShotGenerationResult, method="function_calling")
+	)
 	return await llm.ainvoke(
 		[SystemMessage(content=system_prompt), HumanMessage(content=user_prompt)]
 	)
